@@ -1,8 +1,11 @@
 package moe.ouom.wekit.hooks.item.chat.risk
 
 import android.annotation.SuppressLint
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.ContentValues
 import android.content.Context
+import android.os.Build
 import androidx.core.net.toUri
 import com.afollestad.materialdialogs.MaterialDialog
 import de.robv.android.xposed.XposedHelpers
@@ -14,12 +17,14 @@ import moe.ouom.wekit.core.dsl.dexMethod
 import moe.ouom.wekit.core.model.BaseClickableFunctionHookItem
 import moe.ouom.wekit.dexkit.intf.IDexFind
 import moe.ouom.wekit.hooks.core.annotation.HookItem
+import moe.ouom.wekit.hooks.sdk.api.WeDatabaseApi
 import moe.ouom.wekit.hooks.sdk.api.WeDatabaseListener
 import moe.ouom.wekit.hooks.sdk.api.WeNetworkApi
 import moe.ouom.wekit.ui.creator.dialog.item.chat.risk.WeRedPacketConfigDialog
 import moe.ouom.wekit.util.log.WeLogger
 import org.json.JSONObject
 import org.luckypray.dexkit.DexKitBridge
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.random.Random
 
@@ -27,9 +32,30 @@ import kotlin.random.Random
 @HookItem(path = "聊天与消息/自动抢红包", desc = "监听消息并自动拆开红包")
 class WeRedPacketAuto : BaseClickableFunctionHookItem(), WeDatabaseListener.DatabaseInsertListener, IDexFind {
 
+    companion object {
+        // [WeKit-Mod] 限流计数器
+        private val grabCount = java.util.concurrent.atomic.AtomicInteger(0)
+        private val lastResetTime = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis())
+        private val rng = java.util.Random()
+
+        private val rateLimitLock = Any()
+
+        private fun canGrab(maxPerMinute: Int): Boolean {
+            synchronized(rateLimitLock) {
+                val now = System.currentTimeMillis()
+                if (now - lastResetTime.get() > 60_000) {
+                    grabCount.set(0)
+                    lastResetTime.set(now)
+                }
+                return grabCount.incrementAndGet() <= maxPerMinute
+            }
+        }
+    }
+
     private val dexClsReceiveLuckyMoney by dexClass()
     private val dexClsOpenLuckyMoney by dexClass()
     private val dexMethodOnGYNetEnd by dexMethod()
+    private val dexMethodOnOpenGYNetEnd by dexMethod()
 
     private val currentRedPacketMap = ConcurrentHashMap<String, RedPacketInfo>()
 
@@ -51,7 +77,11 @@ class WeRedPacketAuto : BaseClickableFunctionHookItem(), WeDatabaseListener.Data
 
         // Hook 具体的网络回调
         hookReceiveCallback()
-        WeLogger.i("WeRedPacketAuto: 网络回调 Hook 完成")
+        WeLogger.i("WeRedPacketAuto: 拆包网络回调 Hook 完成")
+
+        // Hook 开包回调（用于检测是否抢到和获取金额）
+        hookOpenCallback()
+        WeLogger.i("WeRedPacketAuto: 开包网络回调 Hook 完成")
     }
 
     /**
@@ -71,6 +101,30 @@ class WeRedPacketAuto : BaseClickableFunctionHookItem(), WeDatabaseListener.Data
         try {
             val config = WeConfig.getDefaultConfig()
             if (values.getAsInteger("isSend") == 1 && !config.getBoolPrek("red_packet_self")) return
+
+            // [WeKit-Mod] 私聊红包开关
+            val talkerRaw = values.getAsString("talker") ?: ""
+            val isGroupChat = talkerRaw.contains("@chatroom")
+            if (!isGroupChat && !config.getBoolPrek("red_packet_private_chat")) {
+                WeLogger.i("WeRedPacketAuto: 私聊红包已跳过（未开启私聊抢红包）")
+                return
+            }
+
+            // [WeKit-Mod] 随机跳过（模拟“没看到”）
+            val skipEnabled = config.getBoolPrek("red_packet_random_skip")
+            val skipRate = config.getStringPrek("red_packet_skip_rate", "15")?.toFloatOrNull() ?: 15f
+            if (skipEnabled && Random.nextFloat() * 100f < skipRate) {
+                WeLogger.i("WeRedPacketAuto: 随机跳过本次红包（模拟自然行为）")
+                return
+            }
+
+            // [WeKit-Mod] 频率限制
+            val rateLimitEnabled = config.getBoolPrek("red_packet_rate_limit")
+            val maxPerMin = (config.getStringPrek("red_packet_max_per_min", "3")?.toIntOrNull() ?: 3).coerceAtLeast(1)
+            if (rateLimitEnabled && !canGrab(maxPerMin)) {
+                WeLogger.i("WeRedPacketAuto: 频率限制触发，跳过本次红包（已达到每分钟上限 $maxPerMin 个，当前计数 ${grabCount.get()}）")
+                return
+            }
 
             val content = values.getAsString("content") ?: return
             val talker = values.getAsString("talker") ?: ""
@@ -111,12 +165,13 @@ class WeRedPacketAuto : BaseClickableFunctionHookItem(), WeDatabaseListener.Data
 
             WeLogger.i("WeRedPacketAuto: 配置读取 - isRandomDelay=$isRandomDelay, customDelay=$customDelay")
 
-            // 如果开启随机延迟，在自定义延迟基础上增加随机偏移
+            // [WeKit-Mod] 高斯分布延迟，更自然的拟人效果
             val delayTime = if (isRandomDelay) {
-                val baseDelay = if (customDelay > 0) customDelay else 1000L
-                val randomOffset = Random.nextLong(-500, 500)
-                val finalDelay = (baseDelay + randomOffset).coerceAtLeast(0)
-                WeLogger.i("WeRedPacketAuto: 随机延迟模式 - baseDelay=$baseDelay, randomOffset=$randomOffset, finalDelay=$finalDelay")
+                val baseDelay = (if (customDelay > 0) customDelay else 1000L).coerceAtLeast(300)
+                val gaussian = rng.nextGaussian() // 正态分布 μ=0, σ=1
+                val offset = (gaussian * (baseDelay * 0.4)).toLong() // 标准差为基础延迟的40%
+                val finalDelay = (baseDelay + offset).coerceIn(300, baseDelay * 3)
+                WeLogger.i("WeRedPacketAuto: 高斯延迟模式 - baseDelay=$baseDelay, offset=$offset, finalDelay=$finalDelay")
                 finalDelay
             } else {
                 WeLogger.i("WeRedPacketAuto: 固定延迟模式 - delayTime=$customDelay")
@@ -168,12 +223,22 @@ class WeRedPacketAuto : BaseClickableFunctionHookItem(), WeDatabaseListener.Data
                                     info.headImg, info.nickName, info.talker,
                                     "v1.0", timingIdentifier, ""
                                 )
-                                // 使用 NetworkApi 发送
+                                // 使用 NetworkApi 发送（通知改由 hookOpenCallback 处理）
                                 WeNetworkApi.sendRequest(openReq)
+                                WeLogger.i("WeRedPacketAuto: 开包请求已发送 ($sendId)，等待 open 回调")
 
-                                currentRedPacketMap.remove(sendId)
+                                // 防止极端情况下 open 回调未触发导致 map 泄漏
+                                Thread {
+                                    try {
+                                        Thread.sleep(5 * 60 * 1000L) // 5 分钟超时
+                                        currentRedPacketMap.remove(sendId)?.let {
+                                            WeLogger.w("WeRedPacketAuto: open 回调超时，主动清理红包记录 ($sendId)")
+                                        }
+                                    } catch (_: Throwable) {}
+                                }.start()
                             } catch (e: Throwable) {
                                 WeLogger.e("WeRedPacketAuto: 开包失败", e)
+                                currentRedPacketMap.remove(sendId)
                             }
                         }.start()
                     }
@@ -191,6 +256,92 @@ class WeRedPacketAuto : BaseClickableFunctionHookItem(), WeDatabaseListener.Data
         val patternSimple = "<$tag>(.*?)</$tag>".toRegex()
         val matchSimple = patternSimple.find(xml)
         return matchSimple?.groupValues?.get(1) ?: ""
+    }
+
+    /**
+     * Hook OpenLuckyMoney 的 onGYNetEnd 回调
+     * 只有在这个回调中才能确认是否真正抢到红包以及金额
+     */
+    private fun hookOpenCallback() {
+        try {
+            dexMethodOnOpenGYNetEnd.toDexMethod {
+                hook {
+                    afterIfEnabled { param ->
+                        val json = param.args[2] as? JSONObject ?: return@afterIfEnabled
+                        val sendId = json.optString("sendId")
+                        if (sendId.isNullOrEmpty()) return@afterIfEnabled
+
+                        // 打印完整回调日志，方便调试字段名（仅在调试级别输出）
+                        WeLogger.d("WeRedPacketAuto: OpenLuckyMoney 回调 sendId=$sendId, json=$json")
+
+                        val info = currentRedPacketMap.remove(sendId) ?: return@afterIfEnabled
+
+                        // 检查是否成功抢到
+                        val retcode = json.optInt("retcode", -1)
+                        if (retcode != 0) {
+                            WeLogger.i("WeRedPacketAuto: 未抢到红包 retcode=$retcode ($sendId)")
+                            return@afterIfEnabled
+                        }
+
+                        // 获取金额（单位：分）
+                        val recvAmount = json.optInt("recAmount", 0)
+                        if (recvAmount <= 0) {
+                            WeLogger.i("WeRedPacketAuto: 金额为0，跳过通知 ($sendId)")
+                            return@afterIfEnabled
+                        }
+
+                        val amountYuan = recvAmount / 100.0
+                        WeLogger.i("WeRedPacketAuto: 成功抢到红包 ¥$amountYuan ($sendId)")
+
+                        // 通知逻辑
+                        val notifyEnabled = WeConfig.getDefaultConfig().getBoolPrek("red_packet_notification")
+                        if (notifyEnabled) {
+                            // 解析来源名称
+                            val sourceName = try {
+                                WeDatabaseApi.INSTANCE?.getDisplayName(info.talker) ?: info.talker
+                            } catch (_: Throwable) {
+                                info.talker
+                            }
+                            val isGroup = info.talker.endsWith("@chatroom")
+                            val sourceLabel = if (isGroup) "群聊" else "私聊"
+                            showNotification(info, sourceName, sourceLabel, amountYuan)
+                        }
+                    }
+                }
+            }
+        } catch (e: Throwable) {
+            WeLogger.e("WeRedPacketAuto: Hook OpenLuckyMoney onGYNetEnd failed", e)
+        }
+    }
+
+    // [WeKit-Mod] 抢到红包通知（含来源名称和金额）
+    private fun showNotification(info: RedPacketInfo, sourceName: String, sourceLabel: String, amountYuan: Double) {
+        try {
+            val activity = moe.ouom.wekit.config.RuntimeConfig.getLauncherUIActivity()
+            val context = activity?.applicationContext ?: activity ?: return
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+
+            val channelId = "wekit_red_packet"
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                nm.createNotificationChannel(NotificationChannel(
+                    channelId, "红包通知", NotificationManager.IMPORTANCE_HIGH
+                ))
+            }
+
+            val amountStr = String.format(Locale.US, "%.2f", amountYuan)
+            val contentText = "来自$sourceLabel【$sourceName】的 ¥$amountStr"
+
+            val notification = android.app.Notification.Builder(context, channelId)
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setContentTitle("\uD83E\uDDE7 抢到红包")
+                .setContentText(contentText)
+                .setAutoCancel(true)
+                .build()
+
+            nm.notify(info.sendId.hashCode(), notification)
+        } catch (t: Throwable) {
+            WeLogger.e("WeRedPacketAuto: showNotification failed", t)
+        }
     }
 
     override fun unload(classLoader: ClassLoader) {
@@ -236,7 +387,7 @@ class WeRedPacketAuto : BaseClickableFunctionHookItem(), WeDatabaseListener.Data
             throw RuntimeException("DexKit: Failed to find OpenLuckyMoney class with string 'MicroMsg.NetSceneOpenLuckyMoney'")
         }
 
-        // 查找 onGYNetEnd 回调方法
+        // 查找 ReceiveLuckyMoney 的 onGYNetEnd 回调方法
         val receiveLuckyMoneyClassName = dexClsReceiveLuckyMoney.getDescriptorString()
         if (receiveLuckyMoneyClassName != null) {
             val foundMethod = dexMethodOnGYNetEnd.find(dexKit, descriptors,true) {
@@ -247,8 +398,24 @@ class WeRedPacketAuto : BaseClickableFunctionHookItem(), WeDatabaseListener.Data
                 }
             }
             if (!foundMethod) {
-                WeLogger.e("WeRedPacketAuto: Failed to find onGYNetEnd method")
+                WeLogger.e("WeRedPacketAuto: Failed to find ReceiveLuckyMoney onGYNetEnd method")
                 throw RuntimeException("DexKit: Failed to find onGYNetEnd method in $receiveLuckyMoneyClassName")
+            }
+        }
+
+        // 查找 OpenLuckyMoney 的 onGYNetEnd 回调方法
+        val openLuckyMoneyClassName = dexClsOpenLuckyMoney.getDescriptorString()
+        if (openLuckyMoneyClassName != null) {
+            val foundOpenMethod = dexMethodOnOpenGYNetEnd.find(dexKit, descriptors, true) {
+                matcher {
+                    declaredClass = openLuckyMoneyClassName
+                    name = "onGYNetEnd"
+                    paramCount = 3
+                }
+            }
+            if (!foundOpenMethod) {
+                WeLogger.e("WeRedPacketAuto: Failed to find OpenLuckyMoney onGYNetEnd method")
+                throw RuntimeException("DexKit: Failed to find onGYNetEnd method in $openLuckyMoneyClassName")
             }
         }
 
