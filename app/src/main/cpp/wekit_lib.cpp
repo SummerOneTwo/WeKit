@@ -1,3 +1,6 @@
+// [WeKit-Mod] 强制启用 Debug 模式，绕过所有 Native 层反篡改校验
+#define DEBUG 1
+
 #include <jni.h>
 #include <string>
 #include <android/log.h>

@@ -866,13 +866,10 @@ afterEvaluate {
             val stripTask = tasks.findByName("strip${variantName}DebugSymbols")
             val packageTask = tasks.findByName("package${variantName}")
 
-            // 配置 Java 层保护
-            configureJavaProtection(variantName, javacTask, r8Task, protectTask, checksumTask)
-
-            // 配置 Native 层补丁 (如果 Strip 和 Package 任务存在)
-            if (stripTask != null && packageTask != null) {
-                configureNativePatching(variantName, stripTask, packageTask)
-            }
+            // [WeKit-Mod] 跳过所有保护任务（已在 Native/Java 层绕过）
+            // configureJavaProtection(variantName, javacTask, r8Task, protectTask, checksumTask)
+            // configureNativePatching(variantName, stripTask, packageTask)
+            println("⚠️ [WeKit-Mod] Protection tasks DISABLED for $variantName")
         }
     }
 }

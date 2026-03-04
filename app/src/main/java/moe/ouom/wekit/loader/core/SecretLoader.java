@@ -22,13 +22,12 @@ public class SecretLoader {
      * @param processType 当前进程类型
      */
     public static void load(int processType) {
-        WeLogger.i(TAG, "Attempting to load hidden hooks...");
+        WeLogger.i(TAG, "Attempting to load hooks...");
 
-        // DEBUG 模式下不进行动态加载，直接走 Fallback
-        if (BuildConfig.DEBUG) {
-            tryFallbackLoad(processType);
+        // [WeKit-Mod] 强制使用 Fallback 加载，绕过隐藏 DEX 机制
+        tryFallbackLoad(processType);
+        if (true)
             return;
-        }
 
         byte[] dexBytes = WeKitNative.getHiddenDex();
         if (dexBytes == null || dexBytes.length == 0) {
@@ -82,8 +81,7 @@ public class SecretLoader {
             // 注册给主 DEX 的 Bridge
             if (factoryInstance instanceof moe.ouom.wekit.core.bridge.api.IHookFactoryDelegate) {
                 moe.ouom.wekit.core.bridge.HookFactoryBridge.INSTANCE.registerDelegate(
-                        (moe.ouom.wekit.core.bridge.api.IHookFactoryDelegate) factoryInstance
-                );
+                        (moe.ouom.wekit.core.bridge.api.IHookFactoryDelegate) factoryInstance);
                 WeLogger.i(TAG, "HookFactoryBridge registered successfully!");
             } else {
                 WeLogger.e(TAG, "Loaded factory instance does not implement IHookFactoryDelegate!");
@@ -118,8 +116,7 @@ public class SecretLoader {
 
                 if (factoryInstance != null) {
                     moe.ouom.wekit.core.bridge.HookFactoryBridge.INSTANCE.registerDelegate(
-                            (moe.ouom.wekit.core.bridge.api.IHookFactoryDelegate) factoryInstance
-                    );
+                            (moe.ouom.wekit.core.bridge.api.IHookFactoryDelegate) factoryInstance);
                     WeLogger.i(TAG, "[Fallback] HookFactoryBridge registered successfully!");
                 } else {
                     WeLogger.e(TAG, "[Fallback] Factory INSTANCE is null.");

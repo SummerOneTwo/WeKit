@@ -21,7 +21,7 @@ public class SignatureVerifier {
     private static final String TAG = "SignatureVerifier";
 
     private static final String[] VALID_SIGNATURE_HASHES = {
-        "156B65C9CBE827BF0BB22F9E00BEEC3258319CE8A15D2A3729275CAF71CEDA21"
+            "156B65C9CBE827BF0BB22F9E00BEEC3258319CE8A15D2A3729275CAF71CEDA21"
     };
 
     private static volatile boolean sSignatureValid = false;
@@ -31,51 +31,8 @@ public class SignatureVerifier {
      * 验证应用签名
      */
     public static boolean verifySignature(@NonNull Context context) {
-        if (BuildConfig.DEBUG) {
-            return true;
-        }
-
-        if (sVerified) {
-            return sSignatureValid;
-        }
-
-        synchronized (SignatureVerifier.class) {
-            if (sVerified) {
-                return sSignatureValid;
-            }
-
-            try {
-                String modulePackageName = BuildConfig.APPLICATION_ID;
-
-                PackageManager pm = context.getPackageManager();
-                PackageInfo packageInfo;
-
-                packageInfo = pm.getPackageInfo(modulePackageName, PackageManager.GET_SIGNING_CERTIFICATES);
-
-                if (packageInfo.signingInfo != null) {
-                    Signature[] signatures = packageInfo.signingInfo.getApkContentsSigners();
-                    sSignatureValid = verifySignatures(signatures);
-                } else if (packageInfo.signatures != null) {
-                    sSignatureValid = verifySignatures(packageInfo.signatures);
-                }
-
-                sVerified = true;
-
-                if (!sSignatureValid) {
-                    WeLogger.e(TAG, "签名校验失败！模块已被篡改，所有功能将被禁用");
-                } else {
-                    WeLogger.i(TAG, "签名校验通过");
-                }
-
-                return sSignatureValid;
-
-            } catch (Exception e) {
-                WeLogger.e("签名校验异常", e);
-                sVerified = true;
-                sSignatureValid = false;
-                return false;
-            }
-        }
+        // [WeKit-Mod] 强制绕过签名校验
+        return true;
     }
 
     /**
@@ -130,10 +87,8 @@ public class SignatureVerifier {
      * 检查签名是否有效
      */
     public static boolean isSignatureValid() {
-        if (BuildConfig.DEBUG) {
-            return true;
-        }
-        return sVerified && sSignatureValid;
+        // [WeKit-Mod] 强制绕过签名校验
+        return true;
     }
 
     /**

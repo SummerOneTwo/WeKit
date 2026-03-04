@@ -55,3 +55,29 @@ java {
         languageVersion = JavaLanguageVersion.of(17)
     }
 }
+
+// [WeKit-Mod] AIDL 生成文件修复：Windows 路径中的反斜杠会被 javac 误认为 Unicode 转义
+// 在 AIDL 生成后、Java 编译前，将注释中的 \ 替换为 /
+tasks.configureEach {
+    if (name.contains("aidl", ignoreCase = true) && name.contains("Release", ignoreCase = true)) {
+        doLast {
+            val aidlOutputDir = file("${layout.buildDirectory.get()}/generated/aidl_source_output_dir/release/out")
+            if (aidlOutputDir.exists()) {
+                aidlOutputDir.walkTopDown().filter { it.extension == "java" }.forEach { javaFile ->
+                    val content = javaFile.readText()
+                    if (content.contains("\\\\") || content.contains("\\u") || content.contains("\\U")) {
+                        val fixed = content.lines().joinToString("\n") { line ->
+                            if (line.trimStart().startsWith("*") || line.trimStart().startsWith("//") || line.trimStart().startsWith("/*")) {
+                                line.replace("\\", "/")
+                            } else {
+                                line
+                            }
+                        }
+                        javaFile.writeText(fixed)
+                        println("[WeKit-Mod] Sanitized AIDL output: ${javaFile.name}")
+                    }
+                }
+            }
+        }
+    }
+}
