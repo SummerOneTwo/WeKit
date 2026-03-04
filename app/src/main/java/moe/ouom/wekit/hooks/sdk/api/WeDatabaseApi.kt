@@ -410,6 +410,38 @@ class WeDatabaseApi : ApiHookItem(), IDexFind {
         }
     }
 
+    /**
+     * 根据 wxid 获取显示名称
+     * 群聊：返回群名称
+     * 联系人：优先备注名 > 昵称 > wxid
+     */
+    fun getDisplayName(wxid: String): String {
+        if (wxid.isEmpty()) return ""
+        try {
+            val isGroup = wxid.endsWith("@chatroom")
+            val sql = if (isGroup) {
+                "SELECT r.nickname FROM rcontact r WHERE r.username = '$wxid'"
+            } else {
+                "SELECT r.conRemark, r.nickname FROM rcontact r WHERE r.username = '$wxid'"
+            }
+            val result = executeQuery(sql)
+            if (result.isEmpty()) return wxid
+
+            val row = result[0]
+            return if (isGroup) {
+                val nickname = row.str("nickname")
+                nickname.ifEmpty { wxid }
+            } else {
+                val conRemark = row.str("conRemark")
+                val nickname = row.str("nickname")
+                conRemark.ifEmpty { nickname.ifEmpty { wxid } }
+            }
+        } catch (e: Exception) {
+            WeLogger.e(TAG, "getDisplayName 查询失败: $wxid", e)
+            return wxid
+        }
+    }
+
     private fun mapToContact(data: List<Map<String, Any?>>): List<WeContact> {
         return data.map { row ->
             WeContact(
